@@ -1,0 +1,2011 @@
+'Annotated version of Code
+
+Sub main()
+    
+    Dim swApp As SldWorks.SldWorks
+    Dim swModel As SldWorks.ModelDoc2
+    Dim swModelExt As SldWorks.ModelDocExtension
+    Dim swSketchMgr As SldWorks.SketchManager
+    Dim swSketch As SldWorks.Sketch
+    Dim swSelMgr As SldWorks.SelectionMgr
+    Dim swSketchSeg As SldWorks.SketchSegment
+    Dim swSketchPoints As Variant
+    Dim swSketchPoint As SldWorks.SketchPoint
+    Dim linePointIndex As Integer
+    Dim lineEndPoints(1 To 4) As Double
+    
+    Set swApp = Application.SldWorks
+    Set swModel = swApp.NewPart()
+    Set swModelDocExt = swModel.Extension
+    Set swSketchMgr = swModel.SketchManager
+    swSketchMgr.InsertSketch True
+    swModel.ClearSelection2 True
+    Set swSketch = swSketchMgr.ActiveSketch
+    Set swSelMgr = swModel.SelectionManager
+    
+    swApp.SetUserPreferenceToggle swUserPreferenceToggle_e.swSketchInference, False
+    
+    Dim Sheet As Integer
+    Dim SplineCoordinates() As Double
+    Dim SplineCoordinatesSize As Integer
+    Dim SplineList() As Double
+    Dim lineCount As Integer
+    Dim xGridStep As Double
+    Dim yGridStep As Double
+    Dim RectangularGrid() As Variant
+    Dim sRadiusMax As Double
+    Dim sRadiusMin As Double
+    Dim sCenter() As Double
+    Dim circleCenter(1 To 2) As Double
+    Dim scaleDownCounter As Integer
+    Dim shrinkIterator As Double
+    Dim recompute As Boolean
+    Dim currentCorner(1 To 2) As Double
+    Dim instantaneousArea As Double
+    Dim splineArea As Double
+    
+    lineCount = 0
+    
+    ' The meshGrid is created here. It will be used to strategically place particles
+    xGridStep = 0.0005 * 10
+    yGridStep = 0.0005 * 10
+    RectangularGrid = CreateGrid(xGridStep, yGridStep)
+    GridFreeRadius = CreateGridRadiusAvailable(xGridStep, yGridStep)
+    QueueMatrix = CreateVisitedMatrix(xGridStep, yGridStep)
+    RectangularGridReference = CreateGrid(xGridStep, yGridStep)
+    Dim t As Integer
+    Dim p As Integer
+    
+    'Create the circle that will be used for checking which gridPoints are occupied by a new spline
+    circleCenter(1) = 0.3
+    circleCenter(2) = 0
+    Dim swSketchCircle As Object
+    Set swSketchCircle = swSketchMgr.CreateCircleByRadius(0.3, 0, 0, 0.0001)
+    
+    ' LastArea tracks the total accumulated area so far
+    Dim LastArea As Double
+    LastArea = 0
+    
+    ' Some variables for the volume fractions desired and creating separate sketches/planes from the particles so far
+    Dim desiredVF(1 To 20) As Double
+    Dim currentVFtarget As Double
+    Dim vfIndex As Integer
+    Dim planeNumber As Integer
+    planeNumber = 2
+    vfIndex = 1
+    desiredVF(1) = 0.12
+'    desiredVF(2) = 0.013
+'    desiredVF(3) = 0.019
+'    desiredVF(4) = 0.025
+'    desiredVF(5) = 0.031
+'    desiredVF(6) = 0.037
+'    desiredVF(7) = 0.043
+'    desiredVF(8) = 0.049
+'    desiredVF(9) = 0.055
+'    desiredVF(10) = 0.061
+'    desiredVF(11) = 0.067
+'    desiredVF(12) = 0.073
+'    desiredVF(13) = 0.079
+    currentVFtarget = desiredVF(vfIndex)
+        
+    Dim i As Integer
+    i = 1 ' i has to start from 1 as the spline names are reliant on it
+        
+        While LastArea < 0.09
+            
+            Dim maxValues() As Variant
+            Dim minValues() As Variant
+            Dim boundarySurpass() As Variant
+            Dim surpassCount As Variant
+            Dim splineName As String
+            Dim lineName As String
+            Dim Area As Variant
+            Dim HowManyPointsOut As Variant
+            Dim SplineOnSketch As Boolean
+            
+            SplineOnSketch = False 'SplineOnSketch is initialized to False. It will be true when there is a spline present on the sketch and false if it has been deleted. Toggled throughout the code
+            recompute = False ' If the spline is to be shrunk later on, the spline coordinates will have to be recomputed. Later the recalculations are done
+            
+            Sheet = GetRandomNumber(1, 1)
+            SplineCoordinates = GetSplineData(Sheet)
+            
+            'These functions displace randomly, rotate, distort and scale the spline
+            'SplineCoordinates = DisplaceArray(SplineCoordinates, -0.2, 0.2, -0.15, 0.15)
+            SplineCoordinates = RotateCoordinates(SplineCoordinates, CDbl(i))
+            SplineCoordinates = ScaleSplineFromCentroid(SplineCoordinates, 3, 3)
+            
+            ''''Here I need to displace the spline to an available position on the grid. I forgot what this part is for
+'            Dim randomX As Integer
+'            Dim randomY As Integer
+'            randomX = GetRandomNumber(1, 0.4 / xGridStep + 1)
+'            randomY = GetRandomNumber(1, 0.3 / yGridStep + 1)
+'            coordinates = GetGridCoordinates(RectangularGrid, randomX, randomY)
+            
+            ' Get the points on the meshGrid which have the most space to adjacent splines. Find area that is most unoccupied
+            maxSpacedCoords = GetRandomMaxIndex(GridFreeRadius)
+            xCoordinate = RectangularGrid(maxSpacedCoords(0), maxSpacedCoords(1), 1) 'The index may be zero/one or one/two depending on which function is used
+            yCoordinate = RectangularGrid(maxSpacedCoords(0), maxSpacedCoords(1), 2)
+            'Debug.Print maxSpacedCoords(1) & "," & maxSpacedCoords(2)
+            'Debug.Print xCoordinate & "," & yCoordinate
+            
+            ' Translate the spline to the coordinate that is most free/distant from adjacent splines
+            SplineCoordinates = TranslateArray(SplineCoordinates, xCoordinate, yCoordinate) 'xCoordinate, yCoordinate
+            'Debug.Print "randomX=" & randomX & "randomY=" & randomY & "coordinates=" & coordinates(1) & "," & coordinates(2)
+            
+            'This block finds out some information regarding the spline so correct opearations can be done subsequently
+            SplineCoordinatesSize = SizeOfArray(SplineCoordinates)
+            SplineList = ConvertTo1DArray(SplineCoordinates) ' so that the spline can be sketched by SOLIDWORKS
+            maxValues = FindColumnMaxWithIndex(SplineCoordinates)
+            minValues = FindColumnMinWithIndex(SplineCoordinates)
+              
+            'Some parameters to know which and how many edges spline is exceeding
+            boundarySurpass = peripheryCheck(maxValues, minValues) ' a 2x2 matrix saying which of 4 directions spline is exceeding
+            surpassCount = 0 ' initialized to 0
+            surpassCount = CheckCornerSpline(boundarySurpass) 'either 0,1 or 2 representing number of edges through which spline is exceeding
+                    
+            'This chunk ensures if exceeding through one side, there are at least two points outside the boundary. Having just 1 point outside the boundary prevents proper trimming
+            HowManyPointsOut = 0
+            If surpassCount = 1 Then
+                HowManyPointsOut = SurpassParticleCount(SplineCoordinates, boundarySurpass)
+            End If
+            
+            'Create spline and assign its name
+            swSketchMgr.CreateSpline ((SplineList))
+            splineName = "Spline" & i
+            SplineOnSketch = True
+            
+            ' Once the area exceeds a high value, there is an issue where splines overlap but the GetSectionProperties function still calculates an area as if one spline boolean subtracts the other. This block has a system to prevent that
+            If LastArea > 0.055 Then
+                boolstatus = swModelDocExt.SelectByID2(splineName, "SKETCHSEGMENT", 0, 0, 0, False, 2, Nothing, 0)
+                swModelDocExt.MoveOrCopy False, 1, False, 0, 0, 0, 0.5, 0.5, 0 ' It is moved to a location where it does not intersect anything else so that the incremental area can be calculated
+                instantaneousArea = swModelDocExt.GetSectionProperties2(swSketch)(1) ' This is the total area including the new spline
+                splineArea = instantaneousArea - LastArea '' This is the area of the spline that is to be added
+                swModelDocExt.MoveOrCopy False, 1, False, 0, 0, 0, -0.5, -0.5, 0
+            End If
+            
+            Area = swModelDocExt.GetSectionProperties2(swSketch)(1)
+            'In case the spline overlaps with other existing splines, it can be shrunk to fit the space
+            shrinkIterator = 0.9 ' the scaling factor for shrinking. Can be changed
+            
+            If LastArea > 0.055 Then ' This first part of the while loop is when section area areas that are high and this overlapping issue while section properties can be calculated happens
+                If Area < LastArea Or Abs(Abs(Area - LastArea) - splineArea) > 0.000001 Then 'it ensures that the total section area so far is the previous area plus the spline area. Otherwise you know there is overlap
+                    currentCentroid = SplineCentroid(SplineCoordinates)
+                    scaleDownCounter = 0
+                    While (Area < LastArea Or Abs(Abs(Area - LastArea) - splineArea) > 0.000001) And scaleDownCounter < 25 'it can be scaled down a total of 25 times
+                       boolstatus = swModelDocExt.SelectByID2(splineName, "SKETCHSEGMENT", 0, 0, 0, False, 2, Nothing, 0)
+                       swModelDocExt.ScaleOrCopy False, 1, currentCentroid(1), currentCentroid(2), 0, shrinkIterator ' keep on shrinking the spline until there is no overlap between adjacent splines
+                       splineArea = splineArea * (shrinkIterator ^ 2) '
+                       Area = swModelDocExt.GetSectionProperties2(swSketch)(1)
+                       scaleDownCounter = scaleDownCounter + 1
+                    Wend
+                    recompute = True
+                End If
+            Else
+                
+                If Area < LastArea Then ' when the section area is low the issue does not happen. The spline is scaled down until GetSectionProperties is no longer undefined
+                    currentCentroid = SplineCentroid(SplineCoordinates)
+                    scaleDownCounter = 0
+                    While Area < LastArea And scaleDownCounter < 25
+                       boolstatus = swModelDocExt.SelectByID2(splineName, "SKETCHSEGMENT", 0, 0, 0, False, 2, Nothing, 0)
+                       swModelDocExt.ScaleOrCopy False, 1, currentCentroid(1), currentCentroid(2), 0, shrinkIterator
+                       Area = swModelDocExt.GetSectionProperties2(swSketch)(1)
+                       scaleDownCounter = scaleDownCounter + 1
+                    Wend
+                    recompute = True
+                End If
+            End If
+            
+            'The SplineCoordinates are changed, and therefore everything has to be updated. The same block of code above is repeated
+            'This block finds out some information regarding the spline so correct opearations can be done subsequently
+            If recompute Then
+                SplineCoordinates = MagnifyShape(SplineCoordinates, shrinkIterator ^ scaleDownCounter)
+                SplineCoordinatesSize = SizeOfArray(SplineCoordinates)
+                SplineList = ConvertTo1DArray(SplineCoordinates)
+                
+                maxValues = FindColumnMaxWithIndex(SplineCoordinates)
+                minValues = FindColumnMinWithIndex(SplineCoordinates)
+                  
+                'Some parameters to know which and how many edges spline is exceeding
+                boundarySurpass = peripheryCheck(maxValues, minValues) ' a 2x2 matrix saying which of 4 directions spline is exceeding
+                surpassCount = 0
+                surpassCount = CheckCornerSpline(boundarySurpass) 'either 0,1 or 2 representing number of edges through which spline is exceeding
+                        
+                'This chunk ensures if exceeding through one side, there are at least two points outside the boundary. Otherwise error in trimming ensues
+                HowManyPointsOut = 0
+                If surpassCount = 1 Then
+                    HowManyPointsOut = SurpassParticleCount(SplineCoordinates, boundarySurpass)
+                End If
+            End If
+    
+        
+        
+        
+            'This entire If statement executes when there the spline shape is exceeding the rectangle through 1 side only. It trims it using lines and if the resulting thing is okay, leaves it on the sketch.
+            If surpassCount = 1 And HowManyPointsOut <> 1 And HowManyPointsOut <> 2 Then
+                Dim periphery() As Variant
+                If boundarySurpass(1, 2) = 1 Then
+                    periphery = CutRightParticle(maxValues, minValues, SplineCoordinates, i)
+                ElseIf boundarySurpass(1, 1) = 1 Then
+                    periphery = CutLeftParticle(maxValues, minValues, SplineCoordinates, i)
+                ElseIf boundarySurpass(2, 1) = 1 Then
+                    periphery = CutHighParticle(maxValues, minValues, SplineCoordinates, i)
+                ElseIf boundarySurpass(2, 2) = 1 Then
+                    periphery = CutLowParticle(maxValues, minValues, SplineCoordinates, i)
+                End If
+        
+                Dim skSegment As Object
+                Set skSegment = swSketchMgr.CreateLine(periphery(3, 1), periphery(3, 2), 0#, periphery(4, 1), periphery(4, 2), 0#)
+                lineCount = lineCount + 1
+                lineName = "Line" & lineCount
+                swModel.SetPickMode
+                swModel.ClearSelection2 True
+                
+                boolstatus = swModelDocExt.SelectByID2(Empty, "SKETCHSEGMENT", periphery(1, 1), periphery(1, 2), 0, False, 2, Nothing, 0)
+                boolstatus = swSketchMgr.SketchTrim(4, 0, 0, 0)
+                
+                'Here you get the open points on the spline
+                boolstatus = swModelDocExt.SelectByID2(splineName, "SKETCHSEGMENT", 0, 0, 0, False, 2, Nothing, 0) 'calling it by its name. Hope its assigned already
+                Set swSketchSeg = swSelMgr.GetSelectedObject6(1, -1) 'Gets the first selected object in SolidWorks'
+        
+                swSketchPoints = swSketchSeg.GetPoints2
+        
+                linePointIndex = 1
+                For j = 0 To UBound(swSketchPoints)
+                    Set swSketchPoint = swSketchPoints(j)
+           
+                    If Abs(swSketchPoint.x) = 0.2 Or Abs(swSketchPoint.y) = 0.15 Then
+                       lineEndPoints(linePointIndex) = swSketchPoint.x
+                       linePointIndex = linePointIndex + 1
+                       lineEndPoints(linePointIndex) = swSketchPoint.y
+                       linePointIndex = linePointIndex + 1
+                      'Debug.Print "Point" & i + 1 & ": x = " & swSketchPoint.X & ", y = " & swSketchPoint.Y & ", z = " & swSke
+                    End If
+                Next j
+                
+                lineEndPoints2 = PrioritizeCoordinates(lineEndPoints)
+                
+                boolstatus = swModelDocExt.SelectByID2(splineName, "SKETCHSEGMENT", 0, 0, 0, False, 2, Nothing, 0)
+                swModel.SketchConstraintsDelAll 'This only delete constraints of the spline. line constraints are still there
+                boolstatus = swModelDocExt.SelectByID2(lineName, "SKETCHSEGMENT", 0, 0, 0, False, 0, Nothing, 0)
+                swModel.EditDelete
+                
+                swApp.SetUserPreferenceToggle swUserPreferenceToggle_e.swSketchInference, True
+                                
+                Set skSegment = swSketchMgr.CreateLine(lineEndPoints2(1), lineEndPoints2(2), 0#, lineEndPoints2(3), lineEndPoints2(4), 0#)
+                lineCount = lineCount + 1
+                lineName = "Line" & lineCount
+                            
+                swApp.SetUserPreferenceToggle swUserPreferenceToggle_e.swSketchInference, False
+                
+                Area = swModelDocExt.GetSectionProperties2(swSketch)(1)
+                splineName = "Spline" & i
+                
+                If Area < LastArea Then
+                    boolstatus = swModelDocExt.SelectByID2(splineName, "SKETCHSEGMENT", 0, 0, 0, False, 0, Nothing, 0)
+                    swModel.EditDelete
+                    SplineOnSketch = False
+                    boolstatus = swModelDocExt.SelectByID2(lineName, "SKETCHSEGMENT", 0, 0, 0, False, 0, Nothing, 0)
+                    swModel.EditDelete
+                End If
+                
+              
+            End If
+              
+              
+              
+            'This entire If statement executes when there the spline shape is exceeding the rectangle through 2 sides. It trims it using lines and if the resulting thing is okay, leaves it on the sketch.
+            If surpassCount = 2 Then
+                
+                Dim periphery2() As Variant
+                If boundarySurpass(1, 2) = 1 And boundarySurpass(2, 1) = 1 Then
+                    periphery2 = TopRightCornerParticle(maxValues, minValues, SplineCoordinates, i)
+                    currentCorner(1) = 0.2
+                    currentCorner(2) = 0.15
+                ElseIf boundarySurpass(1, 2) = 1 And boundarySurpass(2, 2) = 1 Then
+                    periphery2 = BottomRightCornerParticle(maxValues, minValues, SplineCoordinates, i)
+                    currentCorner(1) = 0.2
+                    currentCorner(2) = -0.15
+                ElseIf boundarySurpass(2, 1) = 1 And boundarySurpass(1, 1) = 1 Then
+                    periphery2 = TopLeftCornerParticle(maxValues, minValues, SplineCoordinates, i)
+                    currentCorner(1) = -0.2
+                    currentCorner(2) = 0.15
+                ElseIf boundarySurpass(2, 2) = 1 And boundarySurpass(1, 1) = 1 Then
+                    periphery2 = BottomLeftCornerParticle(maxValues, minValues, SplineCoordinates, i)
+                    currentCorner(1) = -0.2
+                    currentCorner(2) = -0.15
+                End If
+                
+                Dim skSegment2 As Object
+                Set skSegment2 = swSketchMgr.CreateLine(periphery2(2, 1), periphery2(2, 2), 0#, periphery2(3, 1), periphery2(3, 2), 0#)
+                Set skSegment2 = swSketchMgr.CreateLine(periphery2(4, 1), periphery2(4, 2), 0#, periphery2(5, 1), periphery2(5, 2), 0#)
+                swModel.SetPickMode
+                swModel.ClearSelection2 True
+                
+                splineName = "Spline" & i
+                Dim lineName1 As String
+                Dim lineName2 As String
+                lineName1 = "Line" & lineCount + 1
+                lineName2 = "Line" & (lineCount + 2)
+                
+                boolstatus = swModelDocExt.SelectByID2(Empty, "SKETCHSEGMENT", periphery2(1, 1), periphery2(1, 2), 0, False, 2, Nothing, 0)
+                boolstatus = swSketchMgr.SketchTrim(4, 0, 0, 0)
+                
+                boolstatus = swModelDocExt.SelectByID2(splineName, "SKETCHSEGMENT", 0, 0, 0, False, 2, Nothing, 0)
+                swModel.SketchConstraintsDelAll
+                boolstatus = swModelDocExt.SelectByID2(lineName1, "SKETCHSEGMENT", 0, 0, 0, False, 0, Nothing, 0)
+                swModel.EditDelete
+                boolstatus = swModelDocExt.SelectByID2(lineName2, "SKETCHSEGMENT", 0, 0, 0, False, 0, Nothing, 0)
+                swModel.EditDelete
+                
+                'Here you get the open points on the spline
+                boolstatus = swModelDocExt.SelectByID2(splineName, "SKETCHSEGMENT", 0, 0, 0, False, 2, Nothing, 0) 'calling it by its name. Hope its assigned already
+                Set swSketchSeg = swSelMgr.GetSelectedObject6(1, -1) 'Gets the first selected object in SolidWorks'
+        
+                swSketchPoints = swSketchSeg.GetPoints2
+        
+                linePointIndex = 1
+                For j = 0 To UBound(swSketchPoints)
+                    Set swSketchPoint = swSketchPoints(j)
+           
+                    If Abs(swSketchPoint.x) = 0.2 Or Abs(swSketchPoint.y) = 0.15 Then
+                       lineEndPoints(linePointIndex) = swSketchPoint.x
+                       linePointIndex = linePointIndex + 1
+                       lineEndPoints(linePointIndex) = swSketchPoint.y
+                       linePointIndex = linePointIndex + 1
+                      'Debug.Print "Point" & i + 1 & ": x = " & swSketchPoint.X & ", y = " & swSketchPoint.Y & ", z = " & swSke
+                    End If
+                Next j
+                
+                
+                swApp.SetUserPreferenceToggle swUserPreferenceToggle_e.swSketchInference, True
+             
+                Set skSegment2 = swSketchMgr.CreateLine(currentCorner(1), currentCorner(2), 0#, lineEndPoints(1), lineEndPoints(2), 0#)
+                Set skSegment2 = swSketchMgr.CreateLine(currentCorner(1), currentCorner(2), 0#, lineEndPoints(3), lineEndPoints(4), 0#)
+                lineCount = lineCount + 2
+                lineName1 = "Line" & lineCount + 1
+                lineName2 = "Line" & (lineCount + 2)
+                
+                swApp.SetUserPreferenceToggle swUserPreferenceToggle_e.swSketchInference, False
+                
+                boolstatus = swModelDocExt.SelectByID2(splineName, "SKETCHSEGMENT", 0, 0, 0, False, 0, Nothing, 0)
+                swModel.ClearSelection2 True
+                boolstatus = swModelDocExt.SelectByID2(lineName1, "SKETCHSEGMENT", 0, 0, 0, False, 0, Nothing, 0)
+                
+                If lineEndPoints(1) = currentCorner(1) Then
+                    swModel.SketchAddConstraints "sgVERTICAL2D"
+                Else
+                    swModel.SketchAddConstraints "sgHORIZONTAL2D"
+                End If
+                
+                swModel.ClearSelection2 True
+                boolstatus = swModelDocExt.SelectByID2(lineName2, "SKETCHSEGMENT", 0, 0, 0, False, 0, Nothing, 0)
+                
+                If lineEndPoints(3) = currentCorner(1) Then
+                    swModel.SketchAddConstraints "sgVERTICAL2D"
+                Else
+                    swModel.SketchAddConstraints "sgHORIZONTAL2D"
+                End If
+                
+                swModel.ClearSelection2 True
+                
+                Area = swModelDocExt.GetSectionProperties2(swSketch)(1)
+                
+                If Area < LastArea Then
+                    boolstatus = swModelDocExt.SelectByID2(splineName, "SKETCHSEGMENT", 0, 0, 0, False, 0, Nothing, 0)
+                    swModel.EditDelete
+                    SplineOnSketch = False
+                    boolstatus = swModelDocExt.SelectByID2(lineName1, "SKETCHSEGMENT", 0, 0, 0, False, 0, Nothing, 0)
+                    swModel.EditDelete
+                    boolstatus = swModelDocExt.SelectByID2(lineName2, "SKETCHSEGMENT", 0, 0, 0, False, 0, Nothing, 0)
+                    swModel.EditDelete
+                End If
+                
+                lineCount = lineCount + 2
+            End If
+            
+            Area = swModelDocExt.GetSectionProperties2(swSketch)(1)
+            
+            'If the spline is not exceeding but still overlapping with previous spline (casuing area=0) delete it
+            If Area < LastArea And surpassCount = 0 And HowManyPointsOut = 0 Then
+                boolstatus = swModelDocExt.SelectByID2(splineName, "SKETCHSEGMENT", 0, 0, 0, False, 0, Nothing, 0)
+                swModel.EditDelete
+                SplineOnSketch = False
+            End If
+            
+            'If the spline is exceeding through one side but there is just 1/2 exceeding points, it was not trimmed by previous "If" statements. It will be deleted
+            If surpassCount = 1 And HowManyPointsOut >= 1 And HowManyPointsOut <= 2 Then
+                boolstatus = swModelDocExt.SelectByID2(splineName, "SKETCHSEGMENT", 0, 0, 0, False, 0, Nothing, 0)
+                swModel.EditDelete
+                SplineOnSketch = False
+            End If
+            
+            'If the spline is still on the sketch, change the grid
+            If SplineOnSketch Then
+                sCenter = SplineCentroid(SplineCoordinates)
+                sRadiusMax = SplineMaxRadius(SplineCoordinates)
+                sRadiusMin = SplineMinRadius(SplineCoordinates)
+                'RectangularGrid = UpdateGrid(RectangularGrid, xGridStep, yGridStep, "Arc1", circleCenter, sCenter, sRadiusMax)
+                'RectangularGrid = UpdateGridEfficient(RectangularGrid, xGridStep, yGridStep, "Arc1", circleCenter, sCenter, sRadiusMax, sRadiusMin)
+                RectangularGrid = AmendGrid(RectangularGrid, sCenter, sRadiusMax, xGridStep, yGridStep)
+            
+                'The amount of grid space to check depends on the size of the particles. Larger particles mean more grid checking. THE NUMBER OF POINTS TO TRAVERSE HAS TO BE SET MANUALLY!!!
+                For t = Max(1, maxSpacedCoords(0) - 15) To Min(UBound(RectangularGrid, 1), maxSpacedCoords(0) + 15)
+                    For p = Max(1, maxSpacedCoords(1) - 15) To Min(UBound(RectangularGrid, 2), maxSpacedCoords(1) + 15) 'Max(1, x - breadth) To Min(UBound(gridArray, 1), x + breadth)
+                        GridFreeRadius(t, p) = AvailableRadius(RectangularGrid, RectangularGridReference, QueueMatrix, t, p)
+                        'Debug.Print RectangularGridReference(t, p, 1) & ","; RectangularGridReference(t, p, 2) & "   radius=  "; GridFreeRadius(t, p)
+                    Next p
+                Next t
+            End If
+            
+            'Debug.Print maxSpacedCoords(1) & "," & maxSpacedCoords(2)
+            'Debug.Print xCoordinate & "," & yCoordinate
+            
+            If surpassCount = 1 Then
+                unwantedLineName = "Line" & (lineCount + 1)
+                boolstatus = swModelDocExt.SelectByID2(unwantedLineName, "SKETCHSEGMENT", 0, 0, 0, False, 0, Nothing, 0)
+                If boolstatus Then
+                    swModel.EditDelete
+                    lineCount = lineCount + 1
+                End If
+            ElseIf surpassCount = 2 Then
+                unwantedLineName = "Line" & (lineCount + 1)
+                boolstatus = swModelDocExt.SelectByID2(unwantedLineName, "SKETCHSEGMENT", 0, 0, 0, False, 0, Nothing, 0)
+                If boolstatus Then
+                    swModel.EditDelete
+                    lineCount = lineCount + 1
+                End If
+            End If
+               
+            LastArea = swModelDocExt.GetSectionProperties2(swSketch)(1)
+            Debug.Print LastArea * 10
+            
+            If LastArea > currentVFtarget And currentVFtarget <> 0 Then
+                
+                swModel.ClearSelection2 True
+                swSketchMgr.InsertSketch True
+                
+                boolstatus = swModelDocExt.SelectByID2("Sketch1", "SKETCH", 0, 0, 0, False, 0, Nothing, 0)
+                swModel.EditCopy
+                swModel.Paste
+                
+                boolstatus = swModelDocExt.SelectByID2("Sketch" & planeNumber, "SKETCH", 0, 0, 0, False, 0, Nothing, 0)
+                boolstatus = swModel.InsertPlanarRefSurface()
+                swModel.ClearSelection2 True
+                
+                planeNumber = planeNumber + 1
+                vfIndex = vfIndex + 1
+                currentVFtarget = desiredVF(vfIndex)
+                
+                boolstatus = swModelDocExt.SelectByID2("Sketch1", "SKETCH", 0, 0, 0, False, 0, Nothing, 0)
+                swModel.EditSketch
+                
+            End If
+ 
+            i = i + 1
+        Wend
+    
+    ' Save the new part document
+    swModel.SaveAs "C:\Final Year Project\Miscellaneous\CompositeParticle.SLDPRT"
+End Sub
+
+Function CreateGridRadiusAvailable(xInterval As Double, yInterval As Double) As Variant
+    ' Define grid parameters
+    Dim xMin As Double, xMax As Double, yMin As Double, yMax As Double
+    Dim xstep As Double, yStep As Double
+    Dim numXPoints As Integer, numYPoints As Integer
+    Dim gridArray() As Variant
+    
+    xMin = -0.2
+    xMax = 0.2
+    yMin = -0.15
+    yMax = 0.15
+    xstep = xInterval
+    yStep = yInterval
+    
+    ' Calculate the number of points in each direction
+    numXPoints = (xMax - xMin) / xstep + 1
+    numYPoints = (yMax - yMin) / yStep + 1
+    
+    ' Resize the gridArray to hold all the points
+    ReDim gridArray(1 To numXPoints, 1 To numYPoints)
+    
+    ' Loop to create the grid points and store them in the array
+    Dim x As Double, y As Double
+    Dim i As Integer, j As Integer
+    x = xMin
+    For i = 1 To numXPoints
+        y = yMin
+        For j = 1 To numYPoints
+            gridArray(i, j) = 100
+            y = y + yStep
+        Next j
+        x = x + xstep
+    Next i
+   
+    CreateGridRadiusAvailable = gridArray
+   
+End Function
+
+Function GetMaxIndex(gridArray As Variant) As Variant
+    ' Define variables
+    Dim maxVal As Double
+    Dim iMax As Integer, jMax As Integer
+    Dim i As Integer, j As Integer
+
+    ' Initialize maximum value and its indices
+    maxVal = gridArray(1, 1)
+    iMax = 1
+    jMax = 1
+
+    ' Find the maximum value and its indices
+    For i = LBound(gridArray, 1) To UBound(gridArray, 1)
+        For j = LBound(gridArray, 2) To UBound(gridArray, 2)
+            If gridArray(i, j) > maxVal Then
+                maxVal = gridArray(i, j)
+                iMax = i
+                jMax = j
+            End If
+        Next j
+    Next i
+
+    ' Create an array for max value indices
+    Dim maxIndex() As Variant
+    ReDim maxIndex(1 To 2)
+    maxIndex(1) = iMax
+    maxIndex(2) = jMax
+
+    ' Return the indices of the maximum value
+    GetMaxIndex = maxIndex
+End Function
+
+Function GetRandomMaxIndex(gridArray As Variant) As Variant
+    ' Define variables
+    Dim maxVal As Double
+    Dim i As Integer, j As Integer
+
+    ' Initialize maximum value
+    maxVal = gridArray(1, 1)
+
+    ' Define a collection to hold indices of maximum values
+    Dim maxIndices As Collection
+    Set maxIndices = New Collection
+
+    ' Find the maximum value and collect its indices
+    For i = LBound(gridArray, 1) To UBound(gridArray, 1)
+        For j = LBound(gridArray, 2) To UBound(gridArray, 2)
+            If gridArray(i, j) > maxVal Then
+                maxVal = gridArray(i, j)
+                Set maxIndices = New Collection
+                maxIndices.Add Array(i, j)
+            ElseIf gridArray(i, j) = maxVal Then
+                maxIndices.Add Array(i, j)
+            End If
+        Next j
+    Next i
+
+    ' Randomly select one index from the collection
+    Dim randomIndex As Integer
+    Randomize
+    randomIndex = Int((maxIndices.count * Rnd) + 1)
+
+    ' Return the randomly selected index
+    GetRandomMaxIndex = maxIndices.Item(randomIndex)
+End Function
+
+Function CreateVisitedMatrix(xInterval As Double, yInterval As Double) As Variant
+    ' Define grid parameters
+    Dim xMin As Double, xMax As Double, yMin As Double, yMax As Double
+    Dim xstep As Double, yStep As Double
+    Dim numXPoints As Integer, numYPoints As Integer
+    Dim gridArray() As Variant
+    
+    xMin = -0.2
+    xMax = 0.2
+    yMin = -0.15
+    yMax = 0.15
+    xstep = xInterval
+    yStep = yInterval
+    
+    ' Calculate the number of points in each direction
+    numXPoints = (xMax - xMin) / xstep + 1
+    numYPoints = (yMax - yMin) / yStep + 1
+    
+    ' Resize the gridArray to hold all the points
+    ReDim gridArray(1 To numXPoints, 1 To numYPoints)
+    
+    ' Loop to create the grid points and store them in the array
+    Dim x As Double, y As Double
+    Dim i As Integer, j As Integer
+    x = xMin
+    For i = 1 To numXPoints
+        y = yMin
+        For j = 1 To numYPoints
+            gridArray(i, j) = False
+            y = y + yStep
+        Next j
+        x = x + xstep
+    Next i
+   
+    CreateVisitedMatrix = gridArray
+   
+End Function
+
+Function AvailableRadius(gridArray As Variant, gridArrayRef As Variant, visited As Variant, x As Integer, y As Integer) As Double
+
+    Dim minDistance As Double
+    Dim curDistance As Double
+    Dim counter As Integer
+    Dim xNotFound As Boolean
+    minDistance = 100
+    breadth = 1
+    xNotFound = True
+    visitedMatrix = visited
+    
+    While xNotFound = True And breadth < 40
+        For i = Max(1, x - breadth) To Min(UBound(gridArray, 1), x + breadth)
+            For j = Max(1, y - breadth) To Min(UBound(gridArray, 2), y + breadth)
+                If gridArray(i, j, 1) = "X" And visitedMatrix(i, j) = False Then
+                    xNotFound = False
+                    currentDistance = Sqr((gridArrayRef(x, y, 1) - gridArrayRef(i, j, 1)) ^ 2 + (gridArrayRef(x, y, 2) - gridArrayRef(i, j, 2)) ^ 2)
+                    If currentDistance < minDistance Then
+                        minDistance = currentDistance
+                    End If
+                End If
+                visitedMatrix(i, j) = True
+            Next j
+        Next i
+        breadth = breadth + 1
+    Wend
+    
+    AvailableRadius = minDistance
+    
+End Function
+
+Function Max(val1 As Integer, val2 As Integer) As Integer
+    If val1 > val2 Then
+        Max = val1
+    Else
+        Max = val2
+    End If
+End Function
+
+Function Min(val1 As Integer, val2 As Integer) As Integer
+    If val1 < val2 Then
+        Min = val1
+    Else
+        Min = val2
+    End If
+End Function
+
+Function PrioritizeCoordinates(coords() As Double) As Variant
+    Dim resultCoords(1 To 4) As Double
+    If Abs(coords(1)) = 0.2 And Abs(coords(3)) = 0.2 Then
+        ' Sort by higher Y value first
+        If coords(2) > coords(4) Then
+            resultCoords(1) = coords(1)
+            resultCoords(2) = coords(2)
+            resultCoords(3) = coords(3)
+            resultCoords(4) = coords(4)
+        Else
+            resultCoords(1) = coords(3)
+            resultCoords(2) = coords(4)
+            resultCoords(3) = coords(1)
+            resultCoords(4) = coords(2)
+        End If
+    ElseIf Abs(coords(2)) = 0.15 And Abs(coords(4)) = 0.15 Then
+        ' Sort by lower X value first
+        If coords(1) < coords(3) Then
+            resultCoords(1) = coords(1)
+            resultCoords(2) = coords(2)
+            resultCoords(3) = coords(3)
+            resultCoords(4) = coords(4)
+        Else
+            resultCoords(1) = coords(3)
+            resultCoords(2) = coords(4)
+            resultCoords(3) = coords(1)
+            resultCoords(4) = coords(2)
+        End If
+    
+    End If
+    
+    PrioritizeCoordinates = resultCoords
+    
+End Function
+
+Function GetGridCoordinates(RectangularGrid() As Variant, randomX As Integer, randomY As Integer) As Variant
+    Dim startX As Integer, startY As Integer
+    Dim currentX As Integer, currentY As Integer
+    Dim wrapped As Boolean
+    Dim count As Integer, maxCount As Integer
+
+    startX = randomX
+    startY = randomY
+    currentX = startX
+    currentY = startY
+    wrapped = False
+    count = 0
+    maxCount = UBound(RectangularGrid, 1) * UBound(RectangularGrid, 2)
+    
+    Do While (RectangularGrid(currentX, currentY, 1) = "X" Or RectangularGrid(currentX, currentY, 2) = "X") And count < maxCount
+        currentX = currentX + 1
+        If currentX > UBound(RectangularGrid, 1) Then
+            currentX = 1
+            currentY = currentY + 1
+            If currentY > UBound(RectangularGrid, 2) Then
+                If wrapped Then
+                    Exit Do
+                End If
+                currentY = 1
+                wrapped = True
+            End If
+        End If
+        count = count + 1
+    Loop
+
+    Dim result(1 To 4) As Variant
+    If count >= maxCount Then
+        result(1) = "NA"
+        result(2) = "NA"
+        result(3) = "NA"
+        result(4) = "NA"
+    Else
+        result(1) = RectangularGrid(currentX, currentY, 1)
+        result(2) = RectangularGrid(currentX, currentY, 2)
+        result(3) = currentX
+        result(4) = currentY
+    End If
+    
+    GetGridCoordinates = result
+End Function
+
+Function GetSplineData(numberOfSheets As Integer) As Double()
+    
+    Dim filePath As String
+    Dim excelApp As Object
+    Dim workbook As Object
+    Dim worksheet As Object
+    Dim dataArray() As Double
+    Dim rowCount As Long
+    Dim columnCount As Long
+    Dim i As Long, j As Long
+    
+    ' Set the path to your Excel file
+    filePath = "C:\Users\dhrub\OneDrive\Documents\Saha Dhrubo FYP Technical Work\1 Microstructure Generation Code\Circles.xlsx"
+    'C:\Users\dhrub\OneDrive\Documents\Saha Dhrubo FYP Technical Work\1 Microstructure Generation Code
+    ' Create an instance of Excel and open the workbook
+    Set excelApp = CreateObject("Excel.Application")
+    Set workbook = excelApp.Workbooks.Open(filePath)
+    
+    ' Set the worksheet to read data from (change the sheet name if needed)
+    Dim sheetnumber As String
+    sheetnumber = "Sheet" & numberOfSheets
+    Set worksheet = workbook.Worksheets(sheetnumber)
+    
+    ' Determine the size of the data range
+    rowCount = worksheet.UsedRange.rows.count
+    columnCount = worksheet.UsedRange.columns.count
+    
+    ' Resize the array to store the data
+    ReDim dataArray(1 To rowCount, 1 To columnCount)
+    
+    ' Loop through each cell in the data range and store the values in the array
+    For i = 1 To rowCount
+        For j = 1 To columnCount
+            dataArray(i, j) = worksheet.Cells(i, j).Value
+        Next j
+    Next i
+    
+    ' Close the workbook and quit Excel
+    workbook.Close
+    excelApp.Quit
+    
+    ' Clean up the objects
+    Set worksheet = Nothing
+    Set workbook = Nothing
+    Set excelApp = Nothing
+    
+    ' Now you can use the data stored in the 'dataArray' variable
+    GetSplineData = dataArray
+End Function
+
+Function SizeOfArray(anArray() As Double) As Integer
+    ' Get the size of the array
+    Dim rows As Long
+    Dim columns As Long
+    rows = UBound(anArray, 1)
+    columns = UBound(anArray, 2)
+    
+    ' Calculate the total size of the array
+    Dim arraySize As Long
+    arraySize = rows * columns
+    
+    SizeOfArray = arraySize
+    ' Print the size of the array
+    'Debug.Print "Array size: " & arraySize
+    'You should use the Ubound function to get the rows and columns in the main functions
+End Function
+
+Function ConvertTo1DArray(ByVal inputArray As Variant) As Variant
+    Dim numRows As Integer
+    Dim numCols As Integer
+    Dim outputArray() As Double
+    Dim i As Integer, j As Integer
+    Dim k As Integer
+    
+    numRows = UBound(inputArray, 1)
+    numCols = UBound(inputArray, 2)
+    
+    ReDim outputArray(1 To numRows * numCols)
+    k = 1
+    
+    For i = 1 To numRows
+        For j = 1 To numCols
+            outputArray(k) = inputArray(i, j)
+            k = k + 1
+        Next j
+    Next i
+    
+    ConvertTo1DArray = outputArray
+End Function
+
+Function GetRandomNumber(Min As Integer, Max As Integer) As Integer
+    Randomize ' Initialize the random number generator
+    GetRandomNumber = Int((Max - Min + 1) * Rnd) + Min
+End Function
+
+Function DisplaceArray(arr() As Double, minimumX As Double, maximumX As Double, minimumY As Double, maximumY As Double) As Variant
+    Dim dx As Double
+    Dim dy As Double
+    Dim modifiedArray() As Double
+    Dim i As Long
+    
+    ' Get the dimensions of the input array
+    Dim numRows As Long
+    Dim numCols As Long
+    numRows = UBound(arr, 1)
+    numCols = UBound(arr, 2)
+    
+    ' Generate random numbers for dx and dy
+    Randomize
+    dx = (maximumX - minimumX) * Rnd + minimumX
+    dy = (maximumY - minimumY) * Rnd + minimumY
+    
+    ' Resize the modified array to match the input array
+    ReDim modifiedArray(1 To numRows, 1 To numCols)
+    
+    ' Modify the elements of the array
+    For i = 1 To numRows
+        modifiedArray(i, 1) = arr(i, 1) + dx
+        modifiedArray(i, 2) = arr(i, 2) + dy
+    Next i
+    
+    ' Return the modified array
+    DisplaceArray = modifiedArray
+End Function
+
+Function TranslateArray(arr() As Double, dx As Variant, dy As Variant) As Variant
+    
+    Dim modifiedArray() As Double
+    Dim i As Long
+    
+    ' Get the dimensions of the input array
+    Dim numRows As Long
+    Dim numCols As Long
+    numRows = UBound(arr, 1)
+    numCols = UBound(arr, 2)
+    
+    ' Resize the modified array to match the input array
+    ReDim modifiedArray(1 To numRows, 1 To numCols)
+    
+    ' Modify the elements of the array
+    For i = 1 To numRows
+        modifiedArray(i, 1) = arr(i, 1) + dx
+        modifiedArray(i, 2) = arr(i, 2) + dy
+    Next i
+    
+    ' Return the modified array
+    TranslateArray = modifiedArray
+End Function
+
+'There is a slight issue here. It does not take into account that the last row and first row are the same. So the calculation of centroid is not correct
+'However the result is not catastropic but simply distorts the particle.
+Function RotateCoordinates(inputArray() As Double, rotationAngle As Double) As Variant
+    Dim numRows As Long
+    Dim xTotal As Double, yTotal As Double
+    Dim centroidX As Double, centroidY As Double
+    Dim outputArray() As Double
+    Dim i As Long
+    
+    numRows = UBound(inputArray, 1)
+    
+    ' Calculate centroid
+    For i = 1 To numRows
+        xTotal = xTotal + inputArray(i, 1)
+        yTotal = yTotal + inputArray(i, 2)
+    Next i
+    
+    centroidX = xTotal / numRows
+    centroidY = yTotal / numRows
+    
+    ' Rotate points around centroid
+    ReDim outputArray(1 To numRows, 1 To 3)
+    
+    For i = 1 To numRows
+        Dim x As Double, y As Double
+        Dim newX As Double, newY As Double
+        
+        x = inputArray(i, 1)
+        y = inputArray(i, 2)
+        
+        newX = centroidX + (x - centroidX) * Cos(rotationAngle) - (y - centroidY) * Sin(rotationAngle)
+        newY = centroidY + (x - centroidX) * Sin(rotationAngle) + (y - centroidY) * Cos(rotationAngle)
+        
+        outputArray(i, 1) = newX
+        outputArray(i, 2) = newY
+        outputArray(i, 3) = 0
+    Next i
+    
+    RotateCoordinates = outputArray
+End Function
+
+' The issue of first and last point being the same also results in wrong calculation. But the result is simply to distort it a bit.
+Function ScaleSplineFromCentroid(controlPoints() As Double, scaleFactorMin As Double, scaleFactorMax As Double) As Variant
+    Dim numRows As Long
+    Dim sumX As Double, sumY As Double, sumZ As Double
+    Dim centroidX As Double, centroidY As Double, centroidZ As Double
+    Dim scaledPoints() As Double
+    Dim i As Long
+    Dim scaleFactor As Double
+    
+    ' Get the number of rows (control points)
+    numRows = UBound(controlPoints, 1)
+    
+    ' Generate a random number
+    Randomize
+    scaleFactor = (scaleFactorMax - scaleFactorMin) * Rnd + scaleFactorMin
+    
+    ' Calculate the centroid of the spline
+    For i = 1 To numRows
+        sumX = sumX + controlPoints(i, 1)
+        sumY = sumY + controlPoints(i, 2)
+        sumZ = sumZ + controlPoints(i, 3)
+    Next i
+    
+    centroidX = sumX / numRows
+    centroidY = sumY / numRows
+    centroidZ = sumZ / numRows
+    
+    ' Scale the points from the centroid by the specified scale factor
+    ReDim scaledPoints(1 To numRows, 1 To 3)
+    For i = 1 To numRows
+        scaledPoints(i, 1) = centroidX + (controlPoints(i, 1) - centroidX) * scaleFactor
+        scaledPoints(i, 2) = centroidY + (controlPoints(i, 2) - centroidY) * scaleFactor
+        scaledPoints(i, 3) = centroidZ + (controlPoints(i, 3) - centroidZ) * scaleFactor
+    
+'        Debug.Print scaledPoints(i, 1)
+'        Debug.Print scaledPoints(i, 2)
+'        Debug.Print scaledPoints(i, 3)
+    Next i
+    
+    ScaleSplineFromCentroid = scaledPoints
+End Function
+
+'This function outputs a 2D array which has the maximum spatial coordinates in the first column and
+'their corresponding indices in the second column. For our case it should be a 3x2 matrix. Although
+'the 3rd row is just the zero row
+Function FindColumnMaxWithIndex(arr As Variant) As Variant
+    Dim numRows As Long
+    Dim numCols As Long
+    Dim result() As Variant
+    Dim i As Long
+    Dim j As Long
+    
+    numRows = UBound(arr, 1)
+    numCols = UBound(arr, 2)
+    ReDim result(1 To numCols, 1 To 2) As Variant
+    
+    For j = 1 To numCols
+        result(j, 1) = arr(1, j)
+        result(j, 2) = 1
+        For i = 2 To numRows
+            If arr(i, j) > result(j, 1) Then
+                result(j, 1) = arr(i, j)
+                result(j, 2) = i
+            End If
+        Next i
+    Next j
+    
+    FindColumnMaxWithIndex = result
+End Function
+
+Function FindColumnMinWithIndex(arr As Variant) As Variant
+    Dim numRows As Long
+    Dim numCols As Long
+    Dim result() As Variant
+    Dim i As Long
+    Dim j As Long
+    
+    numRows = UBound(arr, 1)
+    numCols = UBound(arr, 2)
+    ReDim result(1 To numCols, 1 To 2) As Variant
+    
+    For j = 1 To numCols
+        result(j, 1) = arr(1, j)
+        result(j, 2) = 1
+        For i = 2 To numRows
+            If arr(i, j) < result(j, 1) Then
+                result(j, 1) = arr(i, j)
+                result(j, 2) = i
+            End If
+        Next i
+    Next j
+    
+    FindColumnMinWithIndex = result
+End Function
+
+Function peripheryCheck(maxarr As Variant, minarr As Variant) As Variant
+    
+    Dim maximumX As Double
+    Dim minimumX As Double
+    Dim maximumY As Double
+    Dim minimumY As Double
+    
+    maximumX = maxarr(1, 1)
+    maximumY = maxarr(2, 1)
+    minimumX = minarr(1, 1)
+    minimumY = minarr(2, 1)
+    
+    Dim tooRight As Boolean
+    Dim tooLeft As Boolean
+    Dim tooHigh As Boolean
+    Dim tooLow As Boolean
+
+    If maximumX > 0.2 Then
+        tooRight = True
+    End If
+    If minimumX < -0.2 Then
+        tooLeft = True
+    End If
+    If maximumY > 0.15 Then
+        tooHigh = True
+    End If
+    If minimumY < -0.15 Then
+        tooLow = True
+    End If
+    
+    Dim issueMatrix() As Variant
+    ReDim issueMatrix(1 To 2, 1 To 2) As Variant
+    If tooRight Then
+        issueMatrix(1, 2) = 1
+    Else
+        issueMatrix(1, 2) = 0
+    End If
+    If tooLeft Then
+        issueMatrix(1, 1) = 1
+    Else
+        issueMatrix(1, 1) = 0
+    End If
+    If tooHigh Then
+        issueMatrix(2, 1) = 1
+    Else
+        issueMatrix(2, 1) = 0
+    End If
+    If tooLow Then
+        issueMatrix(2, 2) = 1
+    Else
+        issueMatrix(2, 2) = 0
+    End If
+    
+    peripheryCheck = issueMatrix
+    
+End Function
+
+' This function checks whether the spline goes beyond the boundary over one edge or 2 edges
+Function CheckCornerSpline(arr As Variant) As Variant
+
+    Dim counter As Integer
+    counter = 0
+    
+    For i = 1 To 2
+        For j = 1 To 2
+            counter = counter + arr(i, j)
+        Next j
+    Next i
+    
+    CheckCornerSpline = counter
+    
+End Function
+
+'This function will only be called when surpassCount = 1. That means particles are exceeding the boundaries through just one side
+Function SurpassParticleCount(arr As Variant, peripheryMatrix As Variant) As Variant
+    
+    Dim counter As Integer
+    counter = 0
+    Dim numRows As Integer
+    numRows = UBound(arr, 1) - 1
+    
+    If peripheryMatrix(1, 2) = 1 Then
+        For i = 1 To numRows
+            If arr(i, 1) > 0.2 Then
+                counter = counter + 1
+            End If
+        Next i
+    End If
+    
+    If peripheryMatrix(1, 1) = 1 Then
+        For i = 1 To numRows
+            If arr(i, 1) < -0.2 Then
+                counter = counter + 1
+            End If
+        Next i
+    End If
+                
+    If peripheryMatrix(2, 1) = 1 Then
+        For i = 1 To numRows
+            If arr(i, 2) > 0.15 Then
+                counter = counter + 1
+            End If
+        Next i
+    End If
+            
+    If peripheryMatrix(2, 2) = 1 Then
+        For i = 1 To numRows
+            If arr(i, 2) < -0.15 Then
+                counter = counter + 1
+            End If
+        Next i
+    End If
+                  
+'    Dim outputBoolean As Boolean
+'    If counter = 1 Then
+'        outpootBoolean = False
+'    Else
+'        outputBoolean = True
+'    End If
+    
+    SurpassParticleCount = counter
+    
+End Function
+
+Function MagnifyShape(controlPoints() As Double, scaleFactor As Double) As Variant
+    Dim numRows As Long
+    Dim sumX As Double, sumY As Double, sumZ As Double
+    Dim centroidX As Double, centroidY As Double, centroidZ As Double
+    Dim scaledPoints() As Double
+    Dim i As Long
+    
+    ' Get the number of rows (control points)
+    numRows = UBound(controlPoints, 1)
+    
+    ' Calculate the centroid of the spline
+    For i = 1 To numRows
+        sumX = sumX + controlPoints(i, 1)
+        sumY = sumY + controlPoints(i, 2)
+        sumZ = sumZ + controlPoints(i, 3)
+    Next i
+    
+    centroidX = sumX / numRows
+    centroidY = sumY / numRows
+    centroidZ = sumZ / numRows
+    
+    ' Scale the points from the centroid by the specified scale factor
+    ReDim scaledPoints(1 To numRows, 1 To 3)
+    For i = 1 To numRows
+        scaledPoints(i, 1) = centroidX + (controlPoints(i, 1) - centroidX) * scaleFactor
+        scaledPoints(i, 2) = centroidY + (controlPoints(i, 2) - centroidY) * scaleFactor
+        scaledPoints(i, 3) = centroidZ + (controlPoints(i, 3) - centroidZ) * scaleFactor
+'        Debug.Print scaledPoints(i, 1)
+'        Debug.Print scaledPoints(i, 2)
+'        Debug.Print scaledPoints(i, 3)
+        
+    Next i
+    
+    MagnifyShape = scaledPoints
+End Function
+
+Function CreateGrid(xInterval As Double, yInterval As Double) As Variant
+    ' Define grid parameters
+    Dim xMin As Double, xMax As Double, yMin As Double, yMax As Double
+    Dim xstep As Double, yStep As Double
+    Dim numXPoints As Integer, numYPoints As Integer
+    Dim gridArray() As Variant
+    
+    xMin = -0.2
+    xMax = 0.2
+    yMin = -0.15
+    yMax = 0.15
+    xstep = xInterval
+    yStep = yInterval
+    
+    ' Calculate the number of points in each direction
+    numXPoints = (xMax - xMin) / xstep + 1
+    numYPoints = (yMax - yMin) / yStep + 1
+    
+    ' Resize the gridArray to hold all the points
+    ReDim gridArray(1 To numXPoints, 1 To numYPoints, 1 To 2)
+    
+    ' Loop to create the grid points and store them in the array
+    Dim x As Double, y As Double
+    Dim i As Integer, j As Integer
+    x = xMin
+    For i = 1 To numXPoints
+        y = yMin
+        For j = 1 To numYPoints
+            gridArray(i, j, 1) = x
+            gridArray(i, j, 2) = y
+            y = y + yStep
+        Next j
+        x = x + xstep
+    Next i
+    
+    'This block can print the range of x coordinates
+'    For i = 1 To numXPoints
+'        Debug.Print gridArray(i, 1, 1)
+'    Next i
+        
+    'This block can print the range of y coordinates
+'    For i = 1 To numYPoints
+'        Debug.Print gridArray(1, i, 2)
+'    Next i
+    
+    CreateGrid = gridArray
+   
+End Function
+
+Function AmendGrid(gridArray As Variant, centroid As Variant, radius As Double, xInterval As Double, yInterval As Double) As Variant
+    
+    Dim xMin As Double, xMax As Double, yMin As Double, yMax As Double
+    Dim xstep As Double, yStep As Double
+    Dim numXPoints As Integer, numYPoints As Integer
+    Dim modifiedGridArray() As Variant
+    
+    xMin = -0.2
+    xMax = 0.2
+    yMin = -0.15
+    yMax = 0.15
+    xstep = xInterval
+    yStep = yInterval
+    
+    ' Calculate the number of points in each direction
+    numXPoints = (xMax - xMin) / xstep + 1
+    numYPoints = (yMax - yMin) / yStep + 1
+    
+    ' Resize the gridArray to hold all the points
+    ReDim modifiedGridArray(1 To numXPoints, 1 To numYPoints, 1 To 2)
+    
+    'The x-coordinate and y-coordinate of the centroid
+    Dim centroidX As Double
+    Dim centroidY As Double
+    centroidX = centroid(1)
+    centroidY = centroid(2)
+    
+    ' Loop to create the grid points and store them in the array
+    For i = 1 To numXPoints
+        For j = 1 To numYPoints
+            If gridArray(i, j, 1) <> "X" Then
+                If (gridArray(i, j, 1) - centroidX) ^ 2 + (gridArray(i, j, 2) - centroidY) ^ 2 < radius ^ 2 Then
+                                modifiedGridArray(i, j, 1) = "X"
+                    modifiedGridArray(i, j, 2) = "X"
+                Else
+                    modifiedGridArray(i, j, 1) = gridArray(i, j, 1)
+                    modifiedGridArray(i, j, 2) = gridArray(i, j, 2)
+                End If
+            Else
+                modifiedGridArray(i, j, 1) = "X"
+                modifiedGridArray(i, j, 2) = "X"
+            End If
+        Next j
+    Next i
+    
+    AmendGrid = modifiedGridArray
+    
+End Function
+
+Function UpdateGrid(gridArray As Variant, xInterval As Double, yInterval As Double, circleName As String, circleCenter() As Double, centroid As Variant, radius As Double) As Variant
+    
+    Dim xMin As Double, xMax As Double, yMin As Double, yMax As Double
+    Dim xstep As Double, yStep As Double
+    Dim numXPoints As Integer, numYPoints As Integer
+    Dim modifiedGridArray() As Variant
+    Dim areaInitial As Variant
+    Dim areaNew As Variant
+    Dim currentCircleCenter(1 To 2) As Double
+    
+    Dim swApp As SldWorks.SldWorks
+    Dim swModel As SldWorks.ModelDoc2
+    Dim swModelDocExt As SldWorks.ModelDocExtension
+    Dim boolstatus As Boolean
+    
+    Set swApp = Application.SldWorks
+    Set swModel = swApp.ActiveDoc
+    Set swModelDocExt = swModel.Extension
+    
+    xMin = -0.2
+    xMax = 0.2
+    yMin = -0.15
+    yMax = 0.15
+    xstep = xInterval
+    yStep = yInterval
+    
+    ' Calculate the number of points in each direction
+    numXPoints = (xMax - xMin) / xstep + 1
+    numYPoints = (yMax - yMin) / yStep + 1
+    
+    ' Resize the gridArray to hold all the points
+    ReDim modifiedGridArray(1 To numXPoints, 1 To numYPoints, 1 To 2)
+    
+    Dim centroidX As Double
+    Dim centroidY As Double
+    centroidX = centroid(1)
+    centroidY = centroid(2)
+    
+    'The circle is initially outside the grid
+    areaInitial = swModelDocExt.GetSectionProperties2(swSketch)(1) ' calculate the area when the circle is outside Grid
+    currentCircleCenter(1) = circleCenter(1) ' the coordinates of the circle initially when it is outside the grid
+    currentCircleCenter(2) = circleCenter(2)
+    
+    For i = 1 To numXPoints
+        For j = 1 To numYPoints
+            
+            If gridArray(i, j, 1) <> "X" Then
+                
+                If (gridArray(i, j, 1) - centroidX) ^ 2 + (gridArray(i, j, 2) - centroidY) ^ 2 <= radius ^ 2 Then
+                    boolstatus = swModelDocExt.SelectByID2(circleName, "SKETCHSEGMENT", 0, 0, 0, False, 2, Nothing, 0) 'selects the circle
+                    swModelDocExt.MoveOrCopy False, 1, False, currentCircleCenter(1), currentCircleCenter(2), 0, gridArray(i, j, 1), gridArray(i, j, 2), 0 'move the circle to the correct point on the grid
+                    'update circleCenter as it was moved
+                    currentCircleCenter(1) = gridArray(i, j, 1)
+                    currentCircleCenter(2) = gridArray(i, j, 2)
+                    areaNew = swModelDocExt.GetSectionProperties2(swSketch)(1) 'get the new area after the circle has been moved to the correct point on the grid array
+                    
+                    If CSng(areaNew) < CSng(areaInitial) Then ' if the circle is overlapping with a spline or within a spline this will be the case
+                        modifiedGridArray(i, j, 1) = "X"
+                        modifiedGridArray(i, j, 2) = "X"
+                        
+                    
+                        'Debug.Print "Eliminated x,y=" & gridArray(i, j, 1); "," & gridArray(i, j, 2)
+                        
+                        
+                    Else ' otherwise the areaNew and areaInitial should be the same
+                        modifiedGridArray(i, j, 1) = gridArray(i, j, 1)
+                        modifiedGridArray(i, j, 2) = gridArray(i, j, 2)
+                    End If
+                
+                Else
+                    modifiedGridArray(i, j, 1) = gridArray(i, j, 1)
+                    modifiedGridArray(i, j, 2) = gridArray(i, j, 2)
+                End If
+            
+            Else
+                modifiedGridArray(i, j, 1) = "X"
+                modifiedGridArray(i, j, 2) = "X"
+            End If
+        Next j
+    Next i
+    
+    'At the end return circle to where it was initially
+    boolstatus = swModelDocExt.SelectByID2(circleName, "SKETCHSEGMENT", 0, 0, 0, False, 2, Nothing, 0)
+    swModelDocExt.MoveOrCopy False, 1, False, currentCircleCenter(1), currentCircleCenter(2), 0, circleCenter(1), circleCenter2, 0
+    
+    UpdateGrid = modifiedGridArray
+    
+End Function
+    
+Function UpdateGridEfficient(gridArray As Variant, xInterval As Double, yInterval As Double, circleName As String, circleCenter() As Double, centroid As Variant, maxRadius As Double, minRadius As Double) As Variant
+    
+    Dim xMin As Double, xMax As Double, yMin As Double, yMax As Double
+    Dim xstep As Double, yStep As Double
+    Dim numXPoints As Integer, numYPoints As Integer
+    Dim modifiedGridArray() As Variant
+    Dim areaInitial As Variant
+    Dim areaNew As Variant
+    Dim currentCircleCenter(1 To 2) As Double
+    
+    Dim swApp As SldWorks.SldWorks
+    Dim swModel As SldWorks.ModelDoc2
+    Dim swModelDocExt As SldWorks.ModelDocExtension
+    Dim boolstatus As Boolean
+    
+    Set swApp = Application.SldWorks
+    Set swModel = swApp.ActiveDoc
+    Set swModelDocExt = swModel.Extension
+    
+    xMin = -0.2
+    xMax = 0.2
+    yMin = -0.15
+    yMax = 0.15
+    xstep = xInterval
+    yStep = yInterval
+    
+    ' Calculate the number of points in each direction
+    numXPoints = (xMax - xMin) / xstep + 1
+    numYPoints = (yMax - yMin) / yStep + 1
+    
+    ' Resize the gridArray to hold all the points
+    ReDim modifiedGridArray(1 To numXPoints, 1 To numYPoints, 1 To 2)
+    
+    Dim centroidX As Double
+    Dim centroidY As Double
+    centroidX = centroid(1)
+    centroidY = centroid(2)
+    
+    'The circle is initially outside the grid
+    areaInitial = swModelDocExt.GetSectionProperties2(swSketch)(1) ' calculate the area when the circle is outside Grid
+    currentCircleCenter(1) = circleCenter(1) ' the coordinates of the circle initially when it is outside the grid
+    currentCircleCenter(2) = circleCenter(2)
+    
+    For i = 1 To numXPoints 'So it goes through every gridpoint there is
+        For j = 1 To numYPoints
+            
+            If gridArray(i, j, 1) <> "X" Then 'If the gridPoint is already equal to X, it should stay as X
+                
+                If (gridArray(i, j, 1) - centroidX) ^ 2 + (gridArray(i, j, 2) - centroidY) ^ 2 <= maxRadius ^ 2 Then
+                    
+                    If (gridArray(i, j, 1) - centroidX) ^ 2 + (gridArray(i, j, 2) - centroidY) ^ 2 > minRadius ^ 2 Then
+                    
+                        'This chunk of code moves the circle to the relevant points and then checks whether the point is occupied. This should now only be done when the point is outside the minRadius
+                        boolstatus = swModelDocExt.SelectByID2(circleName, "SKETCHSEGMENT", 0, 0, 0, False, 2, Nothing, 0) 'selects the circle
+                        swModelDocExt.MoveOrCopy False, 1, False, currentCircleCenter(1), currentCircleCenter(2), 0, gridArray(i, j, 1), gridArray(i, j, 2), 0 'move the circle to the correct point on the grid
+                        'update circleCenter as it was moved
+                        currentCircleCenter(1) = gridArray(i, j, 1)
+                        currentCircleCenter(2) = gridArray(i, j, 2)
+                        areaNew = swModelDocExt.GetSectionProperties2(swSketch)(1) 'get the new area after the circle has been moved to the correct point on the grid array
+                        
+                        If CSng(areaNew) < CSng(areaInitial) Then ' if the circle is overlapping with a spline or within a spline this will be the case
+                            modifiedGridArray(i, j, 1) = "X"
+                            modifiedGridArray(i, j, 2) = "X"
+                            'Debug.Print "Eliminated x,y=" & gridArray(i, j, 1); "," & gridArray(i, j, 2)
+                        Else ' otherwise the areaNew and areaInitial should be the same. This means it has not been occupied by the spline
+                            modifiedGridArray(i, j, 1) = gridArray(i, j, 1)
+                            modifiedGridArray(i, j, 2) = gridArray(i, j, 2)
+                        End If
+                    
+                    Else
+                        modifiedGridArray(i, j, 1) = "X"
+                        modifiedGridArray(i, j, 2) = "X"
+                        
+                    End If
+                    
+                
+                Else 'If the gridPoint is outside the maxRadius of Spline no chance it is occupied now. So it retains its previous value
+                    modifiedGridArray(i, j, 1) = gridArray(i, j, 1)
+                    modifiedGridArray(i, j, 2) = gridArray(i, j, 2)
+                End If
+            
+            Else 'If the gridPoint was already X it should stay as X
+                modifiedGridArray(i, j, 1) = "X"
+                modifiedGridArray(i, j, 2) = "X"
+            End If
+        Next j
+    Next i
+    
+    'At the end return circle to where it was initially
+    boolstatus = swModelDocExt.SelectByID2(circleName, "SKETCHSEGMENT", 0, 0, 0, False, 2, Nothing, 0)
+    swModelDocExt.MoveOrCopy False, 1, False, currentCircleCenter(1), currentCircleCenter(2), 0, circleCenter(1), circleCenter2, 0
+    
+    UpdateGridEfficient = modifiedGridArray
+    
+End Function
+
+Function SplineMaxRadius(splineArray() As Double) As Double
+
+    ' Get the number of points in the spline
+    Dim numPoints As Long
+    numPoints = UBound(splineArray, 1)
+    
+    ' Initialize variables for calculating the centroid
+    Dim totalX As Double
+    Dim totalY As Double
+    
+    ' Calculate the centroid
+    Dim i As Long
+    For i = 1 To numPoints - 1
+        totalX = totalX + splineArray(i, 1)
+        totalY = totalY + splineArray(i, 2)
+    Next i
+    
+    Dim centroidX As Double
+    Dim centroidY As Double
+    centroidX = totalX / (numPoints - 1)
+    centroidY = totalY / (numPoints - 1)
+    
+    ' Initialize variables for calculating the maximum distance from the centroid
+    Dim maxDistance As Double
+    maxDistance = 0
+    
+    ' Calculate the distance of each point from the centroid using Pythagoras' Theorem
+    Dim distance As Double
+    For i = 1 To numPoints
+        Dim deltaX As Double
+        Dim deltaY As Double
+        deltaX = splineArray(i, 1) - centroidX
+        deltaY = splineArray(i, 2) - centroidY
+        distance = Sqr(deltaX ^ 2 + deltaY ^ 2)
+        If distance > maxDistance Then
+            maxDistance = distance
+        End If
+    Next i
+    
+    SplineMaxRadius = maxDistance
+End Function
+
+Function SplineMinRadius(splineArray() As Double) As Double
+
+    ' Get the number of points in the spline
+    Dim numPoints As Long
+    numPoints = UBound(splineArray, 1)
+    
+    ' Initialize variables for calculating the centroid
+    Dim totalX As Double
+    Dim totalY As Double
+    
+    ' Calculate the centroid
+    Dim i As Long
+    For i = 1 To numPoints - 1
+        totalX = totalX + splineArray(i, 1)
+        totalY = totalY + splineArray(i, 2)
+    Next i
+    
+    Dim centroidX As Double
+    Dim centroidY As Double
+    centroidX = totalX / (numPoints - 1)
+    centroidY = totalY / (numPoints - 1)
+    
+    ' Initialize variables for calculating the minimum distance from the centroid
+    Dim minDistance As Double
+    minDistance = 100 ' Initialized to a very large value
+    
+    ' Calculate the distance of each point from the centroid using Pythagoras' Theorem
+    Dim distance As Double
+    For i = 1 To numPoints
+        Dim deltaX As Double
+        Dim deltaY As Double
+        deltaX = splineArray(i, 1) - centroidX
+        deltaY = splineArray(i, 2) - centroidY
+        distance = Sqr(deltaX ^ 2 + deltaY ^ 2)
+        If distance < minDistance Then
+            minDistance = distance
+        End If
+    Next i
+    
+    SplineMinRadius = minDistance
+End Function
+
+Function SplineCentroid(splineArray() As Double) As Variant
+
+    ' Get the number of points in the spline
+    Dim numPoints As Long
+    numPoints = UBound(splineArray, 1)
+    
+    ' Initialize variables for calculating the centroid
+    Dim totalX As Double
+    Dim totalY As Double
+    
+    ' Calculate the centroid
+    Dim i As Long
+    For i = 1 To numPoints - 1
+        totalX = totalX + splineArray(i, 1)
+        totalY = totalY + splineArray(i, 2)
+    Next i
+    
+    Dim centroidX As Double
+    Dim centroidY As Double
+    centroidX = totalX / (numPoints - 1)
+    centroidY = totalY / (numPoints - 1)
+    
+    Dim outputArray(1 To 2) As Double
+    outputArray(1) = centroidX
+    outputArray(2) = centroidY
+    
+    SplineCentroid = outputArray
+        
+End Function
+
+'You should make a function to prevent any particles from being exactly on the periphery. Quite unlikely though
+Function CutHighParticle(maxArray As Variant, minArray As Variant, splinedata As Variant, iteration As Variant) As Variant
+        
+        Dim yMax As Double
+        Dim ymaxind As Integer
+        Dim xcorrespond As Double
+        yMax = maxArray(2, 1) 'first argument
+        ymaxind = maxArray(2, 2)
+        xcorrespond = splinedata(ymaxind, 1) 'second argument
+        
+        'for closing the spline once it is opened
+        Dim yMin As Double
+        Dim yminind As Double
+        Dim xcorrespond2 As Double
+        yMin = minArray(2, 1) 'third argument
+        yminind = minArray(2, 2)
+        xcorrespond2 = splinedata(yminind, 1)
+        
+        Dim coordinates() As Variant
+        ReDim coordinates(1 To 4, 1 To 2) As Variant
+        'highest point of spline
+        coordinates(1, 1) = xcorrespond
+        coordinates(1, 2) = yMax
+        'lowest point of spline
+        coordinates(2, 1) = xcorrespond2
+        coordinates(2, 2) = yMin
+        'left end of cutting line
+        coordinates(3, 1) = -0.2 - 0.01 '* iteration
+        coordinates(3, 2) = 0.15
+        'right end of cutting line
+        coordinates(4, 1) = 0.2 + 0.01 '* iteration
+        coordinates(4, 2) = 0.15
+        
+        CutHighParticle = coordinates
+        
+End Function
+
+Function CutLowParticle(maxArray As Variant, minArray As Variant, splinedata As Variant, iteration As Variant) As Variant
+        
+        Dim yMin As Double
+        Dim yminind As Integer
+        Dim xcorrespond As Double
+        yMin = minArray(2, 1) 'first argument
+        yminind = minArray(2, 2)
+        xcorrespond = splinedata(yminind, 1) 'second argument
+        
+        'for closing the spline once it is opened
+        Dim yMax As Double
+        Dim ymaxind As Double
+        Dim xcorrespond2 As Double
+        yMax = maxArray(2, 1) 'third argument
+        ymaxind = maxArray(2, 2)
+        xcorrespond2 = splinedata(ymaxind, 1)
+        
+        Dim coordinates() As Variant
+        ReDim coordinates(1 To 4, 1 To 2) As Variant
+        coordinates(1, 1) = xcorrespond
+        coordinates(1, 2) = yMin
+        coordinates(2, 1) = xcorrespond2
+        coordinates(2, 2) = yMax
+        coordinates(3, 1) = -0.2 - 0.01 '* iteration
+        coordinates(3, 2) = -0.15
+        coordinates(4, 1) = 0.2 + 0.01 '* iteration
+        coordinates(4, 2) = -0.15
+        
+        CutLowParticle = coordinates
+        
+End Function
+
+Function CutRightParticle(maxArray As Variant, minArray As Variant, splinedata As Variant, iteration As Variant) As Variant
+        
+        Dim xMax As Double
+        Dim xmaxind As Integer
+        Dim ycorrespond As Double
+        xMax = maxArray(1, 1) 'first argument
+        xmaxind = maxArray(1, 2)
+        ycorrespond = splinedata(xmaxind, 2) 'second argument
+        
+        'for closing the spline once it is opened
+        Dim xMin As Double
+        Dim xminind As Double
+        Dim ycorrespond2 As Double
+        xMin = minArray(1, 1) 'third argument
+        xminind = minArray(1, 2)
+        ycorrespond2 = splinedata(xminind, 2)
+        
+        Dim coordinates() As Variant
+        ReDim coordinates(1 To 4, 1 To 2) As Variant
+        coordinates(1, 1) = xMax
+        coordinates(1, 2) = ycorrespond
+        coordinates(2, 1) = xMin
+        coordinates(2, 2) = ycorrespond2
+        coordinates(3, 1) = 0.2
+        coordinates(3, 2) = 0.15 + 0.01 '* iteration
+        coordinates(4, 1) = 0.2
+        coordinates(4, 2) = -0.15 - 0.01 '* iteration
+        
+        CutRightParticle = coordinates
+        
+End Function
+
+Function CutLeftParticle(maxArray As Variant, minArray As Variant, splinedata As Variant, iteration As Variant) As Variant
+        
+        Dim xMin As Double
+        Dim xminind As Integer
+        Dim ycorrespond As Double
+        xMin = minArray(1, 1) 'first argument
+        xminind = minArray(1, 2)
+        ycorrespond = splinedata(xminind, 2) 'second argument
+        
+        'for closing the spline once it is opened
+        Dim xMax As Double
+        Dim xmaxind As Double
+        Dim ycorrespond2 As Double
+        xMax = maxArray(1, 1) 'third argument
+        xmaxind = maxArray(1, 2)
+        ycorrespond2 = splinedata(xmaxind, 2)
+        
+        Dim coordinates() As Variant
+        ReDim coordinates(1 To 4, 1 To 2) As Variant
+        coordinates(1, 1) = xMin
+        coordinates(1, 2) = ycorrespond
+        coordinates(2, 1) = xMax
+        coordinates(2, 2) = ycorrespond2
+        coordinates(3, 1) = -0.2
+        coordinates(3, 2) = 0.15 + 0.01 '* iteration
+        coordinates(4, 1) = -0.2
+        coordinates(4, 2) = -0.15 - 0.01 '* iteration
+        
+        CutLeftParticle = coordinates
+        
+End Function
+
+Function TopRightCornerParticle(maxArray As Variant, minArray As Variant, splinedata As Variant, iteration As Variant) As Variant
+        
+        Dim xMax As Double
+        Dim xmaxind As Integer
+        Dim ycorrespond As Double
+        xMax = maxArray(1, 1) 'first argument
+        xmaxind = maxArray(1, 2)
+        ycorrespond = splinedata(xmaxind, 2) 'second argument
+        
+        Dim coordinates() As Variant
+        ReDim coordinates(1 To 5, 1 To 2) As Variant
+        coordinates(1, 1) = xMax
+        coordinates(1, 2) = ycorrespond
+        
+        'this is the line that has to be made it is the vertical line
+        coordinates(2, 1) = 0.2
+        coordinates(2, 2) = 0.15 '+ 0.01 * iteration
+        coordinates(3, 1) = 0.2
+        coordinates(3, 2) = -0.15 - 0.01 '* iteration
+        
+        coordinates(4, 1) = 0.2 '+ 0.01 * iteration
+        coordinates(4, 2) = 0.15
+        coordinates(5, 1) = -0.2 - 0.01 '* iteration
+        coordinates(5, 2) = 0.15
+        
+        TopRightCornerParticle = coordinates
+
+End Function
+
+Function BottomRightCornerParticle(maxArray As Variant, minArray As Variant, splinedata As Variant, iteration As Variant) As Variant
+        
+        Dim xMax As Double
+        Dim xmaxind As Integer
+        Dim ycorrespond As Double
+        xMax = maxArray(1, 1) 'first argument
+        xmaxind = maxArray(1, 2)
+        ycorrespond = splinedata(xmaxind, 2) 'second argument
+        
+        Dim coordinates() As Variant
+        ReDim coordinates(1 To 5, 1 To 2) As Variant
+        coordinates(1, 1) = xMax
+        coordinates(1, 2) = ycorrespond
+        
+        'this is the line that has to be made it is the vertical line
+        coordinates(2, 1) = 0.2
+        coordinates(2, 2) = -0.15 '- 0.01 * iteration
+        coordinates(3, 1) = 0.2
+        coordinates(3, 2) = 0.15 + 0.01 '* iteration
+        
+        coordinates(4, 1) = 0.2 '+ 0.01 * iteration
+        coordinates(4, 2) = -0.15
+        coordinates(5, 1) = -0.2 - 0.01 '* iteration
+        coordinates(5, 2) = -0.15
+        
+        BottomRightCornerParticle = coordinates
+
+End Function
+
+Function TopLeftCornerParticle(maxArray As Variant, minArray As Variant, splinedata As Variant, iteration As Variant) As Variant
+        
+        Dim xMin As Double
+        Dim xminind As Integer
+        Dim ycorrespond As Double
+        xMin = minArray(1, 1) 'first argument
+        xminind = minArray(1, 2)
+        ycorrespond = splinedata(xminind, 2) 'second argument
+        
+        Dim coordinates() As Variant
+        ReDim coordinates(1 To 5, 1 To 2) As Variant
+        coordinates(1, 1) = xMin
+        coordinates(1, 2) = ycorrespond
+        
+        'this is the line that has to be made it is the vertical line
+        coordinates(2, 1) = -0.2
+        coordinates(2, 2) = 0.15 '+ 0.01 * iteration
+        coordinates(3, 1) = -0.2
+        coordinates(3, 2) = -0.15 - 0.01 '* iteration
+        
+        coordinates(4, 1) = -0.2 '- 0.01 * iteration
+        coordinates(4, 2) = 0.15
+        coordinates(5, 1) = 0.2 + 0.01 '* iteration
+        coordinates(5, 2) = 0.15
+        
+        TopLeftCornerParticle = coordinates
+
+End Function
+
+Function BottomLeftCornerParticle(maxArray As Variant, minArray As Variant, splinedata As Variant, iteration As Variant) As Variant
+        
+        Dim xMin As Double
+        Dim xminind As Integer
+        Dim ycorrespond As Double
+        xMin = minArray(1, 1) 'first argument
+        xminind = minArray(1, 2)
+        ycorrespond = splinedata(xminind, 2) 'second argument
+        
+        Dim coordinates() As Variant
+        ReDim coordinates(1 To 5, 1 To 2) As Variant
+        coordinates(1, 1) = xMin
+        coordinates(1, 2) = ycorrespond
+        
+        'this is the line that has to be made it is the vertical line
+        coordinates(2, 1) = -0.2
+        coordinates(2, 2) = -0.15 '- 0.01 * iteration
+        coordinates(3, 1) = -0.2
+        coordinates(3, 2) = 0.15 + 0.01 '* iteration
+        
+        coordinates(4, 1) = -0.2 '- 0.01 * iteration
+        coordinates(4, 2) = -0.15
+        coordinates(5, 1) = 0.2 + 0.01 '* iteration
+        coordinates(5, 2) = -0.15
+        
+        BottomLeftCornerParticle = coordinates
+
+End Function
+
+'The functions from here onwards are not in use presently but were made and can come into play
+Function RejectCoincident(arr As Variant) As Boolean
+    
+    Dim originalRows As Integer
+    Dim rejectArray As Boolean
+    rejectArray = False
+    originalRows = UBound(arr, 1)
+        
+    For i = 1 To originalRows
+        If Abs(Abs(arr(i, 1)) - 0.2) < 0.005 Or Abs(Abs(arr(i, 2)) - 0.15) < 0.005 Then
+            rejectArray = True
+        End If
+    Next i
+            
+    RejectCoincident = rejectArray
+End Function
+
+Function RemoveRows(arr As Variant) As Variant
+    
+    Dim originalRows As Integer
+    Dim modifiedArray() As Variant ' should THIS BE VARIANT???
+    Dim numRowsToRemove As Integer
+    Dim arrayIndicesToRemove() As Integer
+    
+    originalRows = UBound(arr, 1)
+    numRowsToRemove = 0
+    
+    For i = 1 To originalRows
+        If Abs(Abs(arr(i, 1)) - 0.2) < 0.003 Or Abs(Abs(arr(i, 2)) - 0.15) < 0.003 Then
+            numRowsToRemove = numRowsToRemove + 1
+        End If
+    Next i
+            
+    'Debug.Print numRowsToRemove
+            
+    Dim modifiedArrayRowCount As Integer
+    modifiedArrayRowCount = originalRows - numRowsToRemove
+    ReDim modifiedArray(1 To modifiedArrayRowCount, 1 To 3)
+    Dim k As Integer
+    k = 1
+'    Debug.Print originalRows
+    'Debug.Print modifiedArrayRowCount
+    For j = 1 To originalRows
+        If Abs(Abs(arr(j, 1)) - 0.2) >= 0.003 And Abs(Abs(arr(j, 2)) - 0.15) >= 0.003 Then
+            modifiedArray(k, 1) = arr(j, 1)
+            modifiedArray(k, 2) = arr(j, 2)
+            modifiedArray(k, 3) = 0
+            
+            'Debug.Print modifiedArray(k, 1)
+            'Debug.Print modifiedArray(k, 2)
+            k = k + 1
+        End If
+    Next j
+    
+    RemoveRows = modifiedArray
+End Function
+
+Function PreventCoincidentX(arr As Variant) As Variant
+        
+    Dim numRows As Integer
+    numRows = UBound(arr, 1)
+    Dim OverlapX As String
+    Dim modifiedArray() As Double
+    Dim CoincidentNotAverted As Boolean
+    
+    While CoincidentNotAverted
+    
+        If arr(1, 1) < 0 Then
+            For i = 1 To numRows
+                If arr(i, 1) + 0.2 < 0.003 And arr(i, 1) + 0.2 > 0 Then
+                    OverlapX = "DisplaceRight"
+                ElseIf arr(i, 1) + 0.2 > -0.003 And arr(i, 1) + 0.2 < 0 Then
+                    OverlapX = "DisplaceLeft"
+                Else
+                    OverlapX = "NoOverlap"
+                End If
+            Next i
+        End If
+        
+        If arr(1, 1) > 0 Then
+            For i = 1 To numRows
+                If arr(i, 1) - 0.2 < 0.003 And arr(i, 1) - 0.2 > 0 Then
+                    OverlapX = "DisplaceRight"
+                ElseIf arr(i, 1) - 0.2 > -0.003 And arr(i, 1) - 0.2 < 0 Then
+                    OverlapX = "DisplaceLeft"
+                Else
+                    OverlapX = "NoOverlap"
+                End If
+            Next i
+        End If
+            
+        If OverlapX = "DisplaceLeft" Then
+            For i = 1 To numRows
+                modifiedArray(i, 1) = arr(i, 1) - 0.003
+            Next i
+        ElseIf OverlapX = "DisplaceRight" Then
+            For i = 1 To numRows
+                modifiedArray(i, 1) = arr(i, 1) + 0.003
+            Next i
+        Else
+            CoincidentNotAverted = False
+        End If
+    
+    Wend
+    
+    PreventCoincidentX = modifiedArray
+    
+End Function
+
+Function PreventCoincidentY(arr As Variant) As Variant
+        
+    Dim numRows As Integer
+    numRows = UBound(arr, 1)
+    Dim OverlapY As String
+    Dim modifiedArray() As Double
+    Dim CoincidentNotAverted As Boolean
+    
+    While CoincidentNotAverted
+        If arr(1, 2) < 0 Then
+            For i = 1 To numRows
+                If arr(i, 2) + 0.2 < 0.003 And arr(i, 2) + 0.2 > 0 Then
+                    OverlapY = "DisplaceUp"
+                ElseIf arr(i, 2) + 0.2 > -0.003 And arr(i, 2) + 0.2 < 0 Then
+                    OverlapY = "DisplaceDown"
+                Else
+                    OverlapY = "NoOverlap"
+                End If
+            Next i
+        End If
+        
+        If arr(1, 2) > 0 Then
+            For i = 1 To numRows
+                If arr(i, 2) - 0.15 < 0.003 And arr(i, 2) - 0.15 > 0 Then
+                    OverlapY = "DisplaceUp"
+                ElseIf arr(i, 2) - 0.15 > -0.003 And arr(i, 2) - 0.15 < 0 Then
+                    OverlapY = "DisplaceDown"
+                Else
+                    OverlapY = "NoOverlap"
+                End If
+            Next i
+        End If
+        
+        If OverlapY = "DisplaceDown" Then
+            For i = 1 To numRows
+                modifiedArray(i, 2) = arr(i, 2) - 0.003
+            Next i
+        ElseIf OverlapY = "DisplaceUp" Then
+            For i = 1 To numRows
+                modifiedArray(i, 2) = arr(i, 2) + 0.003
+            Next i
+        Else
+            CoincidentNotAverted = False
+        End If
+    Wend
+    
+    PreventCoincidentY = modifiedArray
+End Function
+
+
+
