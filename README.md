@@ -1,3 +1,8 @@
 # CompMCG
 
-CompMCG software is a software meant to be run as a VBA API script interfacing with SOLIDWORKS. The annotated code is in the attached text file. Please watch a brief YouTube tutorial on how to run a VBA script on SOLIDWORKS. 
+CompMCG is an open source microstructure generation software for any heterogeneous material. 
+
+An instructional video guide can be viewed here.
+https://drive.google.com/file/d/1GCxSXyWEnnwVqQBKEYmf1aufeb-kkoOU/view?usp=drive_link
+
+
