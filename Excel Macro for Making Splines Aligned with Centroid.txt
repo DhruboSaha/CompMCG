@@ -1,0 +1,40 @@
+Sub CalculateAndShiftMeans()
+    Dim wb As Workbook
+    Dim ws As Worksheet
+    Dim lastRow As Long
+    Dim xMean As Double, yMean As Double, zMean As Double
+    Dim i As Long
+
+    ' Set the workbook object to the active workbook (the workbook containing the macro)
+    Set wb = ActiveWorkbook
+
+    ' Loop through each sheet in the workbook
+    For Each ws In wb.Worksheets
+        ' Find the last row in column A (x-coordinate)
+        lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+        
+        ' Initialize means to 0
+        xMean = 0
+        yMean = 0
+        zMean = 0
+        
+        ' Calculate the means (ignoring the last entry)
+        For i = 1 To lastRow - 1
+            xMean = xMean + ws.Cells(i, 1).Value
+            yMean = yMean + ws.Cells(i, 2).Value
+            zMean = zMean + ws.Cells(i, 3).Value
+        Next i
+        
+        ' Calculate the mean by dividing the sum by the number of values (lastRow - 1)
+        xMean = xMean / (lastRow - 1)
+        yMean = yMean / (lastRow - 1)
+        zMean = zMean / (lastRow - 1)
+        
+        ' Shift each value in each column by the negative of the mean
+        For i = 1 To lastRow
+            ws.Cells(i, 1).Value = ws.Cells(i, 1).Value - xMean
+            ws.Cells(i, 2).Value = ws.Cells(i, 2).Value - yMean
+            ws.Cells(i, 3).Value = ws.Cells(i, 3).Value - zMean
+        Next i
+    Next ws
+End Sub
